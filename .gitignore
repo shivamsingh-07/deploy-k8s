@@ -1,0 +1,5 @@
+.ansible
+.vagrant
+
+config.yaml
+join-command

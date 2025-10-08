@@ -1,0 +1,184 @@
+---
+- hosts: all
+  become: true
+  tasks:
+    - name: Install necessary packages
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - software-properties-common
+        - gnupg2
+
+    - name: Remove swapfile from /etc/fstab
+      ansible.posix.mount:
+        name: "{{ item }}"
+        fstype: swap
+        state: absent
+      loop:
+        - swap
+        - none
+
+    - name: Disable swap
+      command: swapoff -a
+      when: ansible_swaptotal_mb > 0
+
+    - name: Get CRIO signing key
+      apt_key:
+        url: "https://pkgs.k8s.io/addons:/cri-o:/prerelease:/main/deb/Release.key"
+        state: present
+        keyring: /etc/apt/keyrings/cri-o-apt-keyring.gpg
+
+    - name: Adding apt repository for CRIO
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://pkgs.k8s.io/addons:/cri-o:/prerelease:/main/deb/ /"
+        state: present
+        filename: cri-o
+
+    - name: Install necessary packages
+      apt:
+        name: "cri-o"
+        state: present
+        update_cache: yes
+
+    - name: restart CRIO
+      ansible.builtin.systemd_service:
+        name: crio
+        state: started
+        enabled: true
+        daemon-reload: true
+
+    - name: Add an apt signing key for Kubernetes
+      apt_key:
+        url: "https://pkgs.k8s.io/core:/stable:/v{{K8S_VERSION}}/deb/Release.key"
+        state: present
+        keyring: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Adding apt repository for Kubernetes
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{K8S_VERSION}}/deb/ /"
+        state: present
+        filename: kubernetes
+
+    - name: Install Kubernetes binaries
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Configure containerd
+      blockinfile:
+        create: true
+        path: /etc/modules-load.d/k8s.conf
+        block: |
+          overlay
+          br_netfilter
+
+    - name: Enable kernel modules
+      shell: |
+        modprobe overlay
+        modprobe br_netfilter
+
+    - name: Configure IP forwarding and iptables
+      blockinfile:
+        create: true
+        path: /etc/sysctl.d/k8s.conf
+        block: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+
+    - name: Persist changes
+      command: sysctl --system
+
+    - name: Configure kubelet
+      lineinfile:
+        create: yes
+        path: /etc/default/kubelet
+        line: Environment="KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}"
+
+- hosts: master
+  become: true
+  tasks:
+    - name: Initialize the Kubernetes cluster using kubeadm
+      command: "{{ item }}"
+      args:
+        creates: /etc/kubernetes/admin.conf
+      loop:
+        - kubeadm config images pull
+        - kubeadm init --apiserver-advertise-address="10.0.0.10" --apiserver-cert-extra-sans="10.0.0.10" --pod-network-cidr="172.16.0.0/16" --service-cidr="172.17.1.0/18" --node-name "master" --ignore-preflight-errors Swap
+
+    - name: Create kube directory
+      file:
+        path: /home/vagrant/.kube
+        state: directory
+
+    - name: Setup kubeconfig for vagrant user
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/vagrant/.kube/config
+        remote_src: yes
+        owner: vagrant
+        group: vagrant
+        mode: "0644"
+
+    - name: Download calico.conf
+      become: false
+      get_url:
+        url: https://raw.githubusercontent.com/projectcalico/calico/v{{CALICO_VERSION}}/manifests/calico.yaml
+        dest: /home/vagrant/calico.yaml
+
+    - name: Install calico CNI
+      become: false
+      command: kubectl apply -f calico.yaml
+
+    - name: Generate join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+
+    - name: Copy join command to local file
+      become: false
+      local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+
+    - name: Save kubeconfig to host
+      ansible.builtin.fetch:
+        src: /home/vagrant/.kube/config
+        dest: config.yaml
+        flat: yes
+
+- hosts: nodes
+  become: true
+  tasks:
+    - name: Copy the join command to server location
+      copy: src=join-command dest=/tmp/join-command.sh mode=0777
+
+    - name: Join the node to cluster
+      command: sh /tmp/join-command.sh
+      args:
+        creates: /etc/kubernetes/kubelet.conf
+
+    - name: Create kube directory
+      file:
+        path: /home/vagrant/.kube
+        state: directory
+
+    - name: Copy config to node
+      copy:
+        src: config.yaml
+        dest: /home/vagrant/.kube/config
+        remote_src: no
+        owner: vagrant
+        group: vagrant
+        mode: "0644"
+
+    - name: Install calico CNI
+      become: false
+      ansible.builtin.shell: kubectl label node $(hostname -s) node-role.kubernetes.io/worker=worker
