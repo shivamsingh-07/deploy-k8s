@@ -14,18 +14,16 @@
         - software-properties-common
         - gnupg2
 
-    - name: Remove swapfile from /etc/fstab
-      ansible.posix.mount:
-        name: "{{ item }}"
-        fstype: swap
-        state: absent
-      loop:
-        - swap
-        - none
-
     - name: Disable swap
-      command: swapoff -a
-      when: ansible_swaptotal_mb > 0
+      ansible.builtin.command: swapoff -a
+      when: ansible_facts['swaptotal_mb'] | default(0) > 0
+
+    - name: Remove swap entries from /etc/fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: '^\s*[^#][^\s]+\s+[^\s]+\s+swap\s+'
+        state: absent
+      when: ansible_facts['swaptotal_mb'] | default(0) > 0
 
     - name: Get CRIO signing key
       apt_key:
@@ -105,7 +103,7 @@
         path: /etc/default/kubelet
         line: Environment="KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}"
 
-- hosts: master
+- hosts: control-plane
   become: true
   tasks:
     - name: Initialize the Kubernetes cluster using kubeadm
@@ -154,7 +152,7 @@
         dest: config.yaml
         flat: yes
 
-- hosts: nodes
+- hosts: worker
   become: true
   tasks:
     - name: Copy the join command to server location

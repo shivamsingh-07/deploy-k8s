@@ -1,6 +1,6 @@
 IMAGE_NAME = "ubuntu/jammy64"
-K8S_VERSION = "1.33"
-CALICO_VERSION = "3.30.0"
+K8S_VERSION = "1.35"
+CALICO_VERSION = "3.31.4"
 N = 2
 
 Vagrant.configure("2") do |config|
