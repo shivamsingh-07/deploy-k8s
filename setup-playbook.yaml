@@ -1,182 +1,215 @@
 ---
-- hosts: all
+- name: Prepare all nodes
+  hosts: all
   become: true
+  vars:
+    kube_user: vagrant
+    cri_o_keyring: /etc/apt/keyrings/cri-o-apt-keyring.gpg
+    k8s_keyring: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
   tasks:
-    - name: Install necessary packages
-      apt:
-        name: "{{ item }}"
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - gnupg2
         state: present
-        update_cache: yes
-      loop:
-        - apt-transport-https
-        - ca-certificates
-        - curl
-        - software-properties-common
-        - gnupg2
+        update_cache: true
 
     - name: Disable swap
       ansible.builtin.command: swapoff -a
       when: ansible_facts['swaptotal_mb'] | default(0) > 0
 
-    - name: Remove swap entries from /etc/fstab
+    - name: Remove swap from fstab
       ansible.builtin.lineinfile:
         path: /etc/fstab
         regexp: '^\s*[^#][^\s]+\s+[^\s]+\s+swap\s+'
         state: absent
       when: ansible_facts['swaptotal_mb'] | default(0) > 0
 
-    - name: Get CRIO signing key
-      apt_key:
-        url: "https://pkgs.k8s.io/addons:/cri-o:/prerelease:/main/deb/Release.key"
-        state: present
-        keyring: /etc/apt/keyrings/cri-o-apt-keyring.gpg
+    - name: Download CRI-O repository key
+      ansible.builtin.get_url:
+        url: https://pkgs.k8s.io/addons:/cri-o:/prerelease:/main/deb/Release.key
+        dest: /tmp/cri-o-release.key
+        mode: "0644"
 
-    - name: Adding apt repository for CRIO
-      apt_repository:
-        repo: "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://pkgs.k8s.io/addons:/cri-o:/prerelease:/main/deb/ /"
+    - name: Install CRI-O GPG key
+      ansible.builtin.shell: gpg --dearmor --batch --yes -o {{ cri_o_keyring }} /tmp/cri-o-release.key
+      args:
+        creates: "{{ cri_o_keyring }}"
+
+    - name: Add CRI-O apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by={{ cri_o_keyring }}] https://pkgs.k8s.io/addons:/cri-o:/prerelease:/main/deb/ /"
         state: present
         filename: cri-o
 
-    - name: Install necessary packages
-      apt:
-        name: "cri-o"
+    - name: Install CRI-O
+      ansible.builtin.apt:
+        name: cri-o
         state: present
-        update_cache: yes
 
-    - name: restart CRIO
-      ansible.builtin.systemd_service:
+    - name: Enable and start CRI-O
+      ansible.builtin.systemd:
         name: crio
         state: started
         enabled: true
-        daemon-reload: true
+        daemon_reload: true
 
-    - name: Add an apt signing key for Kubernetes
-      apt_key:
-        url: "https://pkgs.k8s.io/core:/stable:/v{{K8S_VERSION}}/deb/Release.key"
-        state: present
-        keyring: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    - name: Download Kubernetes repository key
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/v{{ K8S_VERSION }}/deb/Release.key"
+        dest: /tmp/kubernetes-release.key
+        mode: "0644"
 
-    - name: Adding apt repository for Kubernetes
-      apt_repository:
-        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{K8S_VERSION}}/deb/ /"
+    - name: Install Kubernetes GPG key
+      ansible.builtin.shell: gpg --dearmor --batch --yes -o {{ k8s_keyring }} /tmp/kubernetes-release.key
+      args:
+        creates: "{{ k8s_keyring }}"
+
+    - name: Add Kubernetes apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by={{ k8s_keyring }}] https://pkgs.k8s.io/core:/stable:/v{{ K8S_VERSION }}/deb/ /"
         state: present
         filename: kubernetes
 
-    - name: Install Kubernetes binaries
-      apt:
-        name: "{{ item }}"
+    - name: Install kubernetes binaries
+      ansible.builtin.apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
         state: present
-        update_cache: yes
-      loop:
-        - kubelet
-        - kubeadm
-        - kubectl
 
-    - name: Configure containerd
-      blockinfile:
-        create: true
+    - name: Ensure kernel modules config
+      ansible.builtin.blockinfile:
         path: /etc/modules-load.d/k8s.conf
         block: |
           overlay
           br_netfilter
-
-    - name: Enable kernel modules
-      shell: |
-        modprobe overlay
-        modprobe br_netfilter
-
-    - name: Configure IP forwarding and iptables
-      blockinfile:
         create: true
+
+    - name: Load kernel modules
+      ansible.builtin.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Ensure sysctl settings for Kubernetes
+      ansible.builtin.blockinfile:
         path: /etc/sysctl.d/k8s.conf
         block: |
           net.bridge.bridge-nf-call-iptables  = 1
           net.bridge.bridge-nf-call-ip6tables = 1
           net.ipv4.ip_forward                 = 1
+        create: true
 
-    - name: Persist changes
-      command: sysctl --system
+    - name: Apply kernel settings
+      ansible.builtin.command: sysctl --system
 
-    - name: Configure kubelet
-      lineinfile:
-        create: yes
+    - name: Set kubelet node IP
+      ansible.builtin.lineinfile:
         path: /etc/default/kubelet
-        line: Environment="KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}"
+        line: "KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}"
+        create: true
 
-- hosts: control-plane
+    - name: Restart kubelet
+      ansible.builtin.systemd:
+        name: kubelet
+        state: restarted
+        daemon_reload: true
+
+- name: Configure control-plane
+  hosts: control-plane
   become: true
+  vars:
+    kube_user: vagrant
+    pod_network_cidr: 172.16.0.0/16
+
   tasks:
-    - name: Initialize the Kubernetes cluster using kubeadm
-      command: "{{ item }}"
+    - name: Pull kubeadm images
+      ansible.builtin.command: kubeadm config images pull
+
+    - name: Initialize control-plane
+      ansible.builtin.command: >
+        kubeadm init
+        --apiserver-advertise-address={{ node_ip }}
+        --apiserver-cert-extra-sans={{ node_ip }}
+        --pod-network-cidr={{ pod_network_cidr }}
+        --node-name={{ inventory_hostname }}
       args:
         creates: /etc/kubernetes/admin.conf
-      loop:
-        - kubeadm config images pull
-        - kubeadm init --apiserver-advertise-address="10.0.0.10" --apiserver-cert-extra-sans="10.0.0.10" --pod-network-cidr="172.16.0.0/16" --service-cidr="172.17.1.0/18" --node-name "master" --ignore-preflight-errors Swap
 
-    - name: Create kube directory
-      file:
-        path: /home/vagrant/.kube
+    - name: Create kube config directory
+      ansible.builtin.file:
+        path: /home/{{ kube_user }}/.kube
         state: directory
+        mode: "0755"
+        owner: "{{ kube_user }}"
+        group: "{{ kube_user }}"
 
-    - name: Setup kubeconfig for vagrant user
-      copy:
+    - name: Copy admin kubeconfig for {{ kube_user }}
+      ansible.builtin.copy:
         src: /etc/kubernetes/admin.conf
-        dest: /home/vagrant/.kube/config
-        remote_src: yes
-        owner: vagrant
-        group: vagrant
+        dest: /home/{{ kube_user }}/.kube/config
+        remote_src: true
+        owner: "{{ kube_user }}"
+        group: "{{ kube_user }}"
         mode: "0644"
 
-    - name: Download calico.conf
+    - name: Install Calico CNI
+      ansible.builtin.command: kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v{{ CALICO_VERSION }}/manifests/calico.yaml
       become: false
-      get_url:
-        url: https://raw.githubusercontent.com/projectcalico/calico/v{{CALICO_VERSION}}/manifests/calico.yaml
-        dest: /home/vagrant/calico.yaml
-
-    - name: Install calico CNI
-      become: false
-      command: kubectl apply -f calico.yaml
 
     - name: Generate join command
-      command: kubeadm token create --print-join-command
+      ansible.builtin.command: kubeadm token create --print-join-command
       register: join_command
+      changed_when: false
 
-    - name: Copy join command to local file
-      become: false
-      local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+    - name: Copy join command to controller
+      ansible.builtin.copy:
+        content: "{{ join_command.stdout }}"
+        dest: /{{ kube_user }}/join-command
 
-    - name: Save kubeconfig to host
+    - name: Fetch kubeconfig to controller
       ansible.builtin.fetch:
-        src: /home/vagrant/.kube/config
+        src: /home/{{ kube_user }}/.kube/config
         dest: config.yaml
-        flat: yes
+        flat: true
 
-- hosts: worker
+- name: Configure workers
+  hosts: worker
   become: true
-  tasks:
-    - name: Copy the join command to server location
-      copy: src=join-command dest=/tmp/join-command.sh mode=0777
+  vars:
+    kube_user: vagrant
 
-    - name: Join the node to cluster
-      command: sh /tmp/join-command.sh
+  tasks:
+    - name: Join worker to cluster
+      ansible.builtin.command: sh /{{ kube_user }}/join-command
       args:
         creates: /etc/kubernetes/kubelet.conf
 
-    - name: Create kube directory
-      file:
-        path: /home/vagrant/.kube
+    - name: Create kube config directory
+      ansible.builtin.file:
+        path: /home/{{ kube_user }}/.kube
         state: directory
+        owner: "{{ kube_user }}"
+        group: "{{ kube_user }}"
+        mode: "0755"
 
-    - name: Copy config to node
-      copy:
+    - name: Copy kubeconfig to worker
+      ansible.builtin.copy:
         src: config.yaml
-        dest: /home/vagrant/.kube/config
-        remote_src: no
-        owner: vagrant
-        group: vagrant
+        dest: /home/{{ kube_user }}/.kube/config
+        owner: "{{ kube_user }}"
+        group: "{{ kube_user }}"
         mode: "0644"
 
-    - name: Install calico CNI
+    - name: Label node as worker
+      ansible.builtin.command: kubectl label node {{ inventory_hostname }} node-role.kubernetes.io/worker=worker
       become: false
-      ansible.builtin.shell: kubectl label node $(hostname -s) node-role.kubernetes.io/worker=worker

@@ -11,7 +11,7 @@ Vagrant.configure("2") do |config|
         master.vm.hostname = "master"
         master.vm.network "private_network", ip: "10.0.0.10"
         master.vm.provider "virtualbox" do |v|
-            v.memory = 4096
+            v.memory = 2048
             v.cpus = 2
         end
         master.vm.provision "ansible" do |ansible|
@@ -31,7 +31,7 @@ Vagrant.configure("2") do |config|
             node.vm.hostname = "node-#{i}"
             node.vm.network "private_network", ip: "10.0.0.#{i + 10}"
             node.vm.provider "virtualbox" do |v|
-                v.memory = 2048
+                v.memory = 1024
                 v.cpus = 1
             end
             node.vm.provision "ansible" do |ansible|
@@ -47,4 +47,3 @@ Vagrant.configure("2") do |config|
         end
     end
 end
-
