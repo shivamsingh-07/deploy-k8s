@@ -1,6 +1,5 @@
 IMAGE_NAME = "ubuntu/jammy64"
-K8S_VERSION = "1.35"
-CALICO_VERSION = "3.31.4"
+K8S_VERSION = "1.36"
 N = 2
 
 Vagrant.configure("2") do |config|
@@ -19,7 +18,6 @@ Vagrant.configure("2") do |config|
             ansible.playbook = "setup-playbook.yaml"
             ansible.inventory_path = "inventory.ini"
             ansible.extra_vars = {
-                CALICO_VERSION: CALICO_VERSION,
                 K8S_VERSION: K8S_VERSION,
                 node_ip: "10.0.0.10",
             }
@@ -39,7 +37,6 @@ Vagrant.configure("2") do |config|
                 ansible.playbook = "setup-playbook.yaml"
                 ansible.inventory_path = "inventory.ini"
                 ansible.extra_vars = {
-                    CALICO_VERSION: CALICO_VERSION,
                     K8S_VERSION: K8S_VERSION,
                     node_ip: "10.0.0.#{i + 10}",
                 }
